@@ -17,6 +17,7 @@ package org.thingsboard.rule.engine.node.transform;
 
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 import lombok.extern.slf4j.Slf4j;
 import org.thingsboard.rule.engine.api.RuleNode;
@@ -26,13 +27,14 @@ import org.thingsboard.rule.engine.api.TbNode;
 import org.thingsboard.rule.engine.api.TbNodeConfiguration;
 import org.thingsboard.rule.engine.api.TbNodeException;
 import org.thingsboard.rule.engine.api.util.TbNodeUtils;
+import org.thingsboard.server.common.data.Device;
 import org.thingsboard.server.common.data.EntityType;
-import org.thingsboard.server.common.data.id.EntityId;
 import org.thingsboard.server.common.data.msg.TbNodeConnectionType;
 import org.thingsboard.server.common.data.plugin.ComponentType;
 import org.thingsboard.server.common.data.script.ScriptLanguage;
 import org.thingsboard.server.common.msg.TbMsg;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -90,6 +92,10 @@ public class TbSplitToQueueNode implements TbNode {
         if (config.getOriginatorType() == null) {
             throw new TbNodeException("Originator type is not set!", true);
         }
+        // Only devices are resolvable by name here. Rejected at configuration time rather than per message.
+        if (config.getOriginatorType() != EntityType.DEVICE) {
+            throw new TbNodeException("Unsupported originator type: " + config.getOriginatorType(), true);
+        }
         if (config.getOriginatorNamePattern() == null || config.getOriginatorNamePattern().isBlank()) {
             throw new TbNodeException("Originator name pattern is not set!", true);
         }
@@ -126,20 +132,48 @@ public class TbSplitToQueueNode implements TbNode {
         }
         // Resolve every originator BEFORE enqueueing anything: a name that cannot be resolved must fail the
         // whole incoming message rather than leave part of the fan-out already on the queue.
-        TbMsg[] toEnqueue = new TbMsg[produced.size()];
-        for (int i = 0; i < produced.size(); i++) {
-            TbMsg out = produced.get(i);
+        //
+        // The lookups run concurrently. findDeviceByTenantIdAndNameAsync submits the CACHED lookup to the
+        // DAO's own executor, so this neither loses the cache nor needs an executor of its own — resolving a
+        // large fan-out costs roughly one lookup's latency instead of the sum of all of them.
+        List<String> names = new ArrayList<>(produced.size());
+        List<ListenableFuture<Device>> lookups = new ArrayList<>(produced.size());
+        for (TbMsg out : produced) {
             String name = TbNodeUtils.processPattern(config.getOriginatorNamePattern(), out);
-            EntityId originator;
-            try {
-                originator = findEntityByName(ctx, config.getOriginatorType(), name);
-            } catch (Exception e) {
-                ctx.tellFailure(incoming, e);
+            if (name == null || name.isBlank()) {
+                ctx.tellFailure(incoming, new TbNodeException("Originator name pattern resolved to an empty name!"));
                 return;
             }
-            toEnqueue[i] = out.transform().originator(originator).build();
+            names.add(name);
+            lookups.add(ctx.getDeviceService().findDeviceByTenantIdAndNameAsync(ctx.getTenantId(), name));
         }
 
+        // allAsList fails as soon as any lookup fails, so a partial resolution never reaches the enqueue below.
+        Futures.addCallback(Futures.allAsList(lookups), new FutureCallback<>() {
+            @Override
+            public void onSuccess(List<Device> devices) {
+                TbMsg[] toEnqueue = new TbMsg[produced.size()];
+                for (int i = 0; i < produced.size(); i++) {
+                    Device device = devices.get(i);
+                    if (device == null) { // not found — the lookup resolves to null rather than failing
+                        ctx.tellFailure(incoming, new TbNodeException(
+                                "Failed to find " + config.getOriginatorType().name().toLowerCase()
+                                        + " with name '" + names.get(i) + "'!"));
+                        return;
+                    }
+                    toEnqueue[i] = produced.get(i).transform().originator(device.getId()).build();
+                }
+                enqueueResolved(ctx, incoming, toEnqueue);
+            }
+
+            @Override
+            public void onFailure(Throwable t) {
+                ctx.tellFailure(incoming, t);
+            }
+        }, MoreExecutors.directExecutor());
+    }
+
+    private void enqueueResolved(TbContext ctx, TbMsg incoming, TbMsg[] toEnqueue) {
         // Forward the incoming message only once every produced message is enqueued; fail it on the first
         // enqueue error. `failed` makes the failure path fire at most once.
         AtomicInteger pending = new AtomicInteger(toEnqueue.length);
@@ -157,20 +191,6 @@ public class TbSplitToQueueNode implements TbNode {
                         }
                     });
         }
-    }
-
-    private EntityId findEntityByName(TbContext ctx, EntityType type, String name) throws TbNodeException {
-        if (name == null || name.isBlank()) {
-            throw new TbNodeException("Originator name pattern resolved to an empty name!");
-        }
-        if (type != EntityType.DEVICE) {
-            throw new TbNodeException("Unsupported originator type: " + type);
-        }
-        var device = ctx.getDeviceService().findDeviceByTenantIdAndName(ctx.getTenantId(), name);
-        if (device == null) {
-            throw new TbNodeException("Failed to find " + type.name().toLowerCase() + " with name '" + name + "'!");
-        }
-        return device.getId();
     }
 
     @Override

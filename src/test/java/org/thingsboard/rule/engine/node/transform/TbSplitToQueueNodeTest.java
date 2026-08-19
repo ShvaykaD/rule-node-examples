@@ -81,8 +81,8 @@ public class TbSplitToQueueNodeTest {
         lenient().when(ctxMock.getTenantId()).thenReturn(TENANT_ID);
         lenient().when(ctxMock.getDeviceService()).thenReturn(deviceServiceMock);
         lenient().when(ctxMock.createScriptEngine(any(), anyString())).thenReturn(scriptEngineMock);
-        lenient().when(deviceServiceMock.findDeviceByTenantIdAndName(eq(TENANT_ID), anyString()))
-                .thenAnswer(invocation -> deviceNamed(invocation.getArgument(1)));
+        lenient().when(deviceServiceMock.findDeviceByTenantIdAndNameAsync(eq(TENANT_ID), anyString()))
+                .thenAnswer(invocation -> Futures.immediateFuture(deviceNamed(invocation.getArgument(1))));
     }
 
     // ---------- init ----------
@@ -219,7 +219,8 @@ public class TbSplitToQueueNodeTest {
     @Test
     public void givenAnUnresolvableEntityName_whenOnMsg_thenNothingIsEnqueued() throws TbNodeException {
         initWithDefaultConfig();
-        given(deviceServiceMock.findDeviceByTenantIdAndName(TENANT_ID, "missing")).willReturn(null);
+        given(deviceServiceMock.findDeviceByTenantIdAndNameAsync(TENANT_ID, "missing"))
+                .willReturn(Futures.immediateFuture(null));
         var incoming = msgWithEntityName("ignored");
         given(scriptEngineMock.executeUpdateAsync(incoming)).willReturn(Futures.immediateFuture(
                 List.of(msgWithEntityName("device-1"), msgWithEntityName("missing"))));
