@@ -50,8 +50,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>This node performs all three steps in one pass: split, re-originate, enqueue to the target queue. Each
  * produced message is therefore partitioned by its own originator, and crosses the queue once instead of twice.
  *
- * <p>The incoming message is acknowledged only after EVERY produced message has been successfully enqueued,
- * and is failed if any one of them fails — so a partial fan-out is never silently committed.
+ * <p>The incoming message is forwarded to <b>Success</b> only after EVERY produced message has been
+ * successfully enqueued, and is routed to <b>Failure</b> if any one of them fails — so a partial fan-out is
+ * never silently committed.
+ *
+ * <p>Both the incoming message and the produced messages leave on <b>Success</b>: the incoming one directly,
+ * the produced ones when they are later consumed from the target queue. They are distinguishable by message
+ * type, so a following switch can send each down its own branch.
  */
 @Slf4j
 @RuleNode(
@@ -65,9 +70,12 @@ import java.util.concurrent.atomic.AtomicInteger;
                 "For every produced message the configured name pattern is resolved against that message, the " +
                 "entity of the configured type is looked up by the resulting name, and it becomes the message's " +
                 "originator. The message is then enqueued directly onto the queue configured on this node.<br><br>" +
-                "The incoming message is acknowledged only once all produced messages are enqueued. If any of " +
-                "them fails to enqueue, or an entity cannot be found, the incoming message is routed to " +
-                "<code>Failure</code>.<br><br>" +
+                "The incoming message is routed to <code>Success</code> only once all produced messages are " +
+                "enqueued. If any of them fails to enqueue, or an entity cannot be found, the incoming message " +
+                "is routed to <code>Failure</code> instead and nothing is enqueued.<br><br>" +
+                "Produced messages also arrive on <code>Success</code>, when they are consumed from the target " +
+                "queue. Since they keep the message type the script gave them, a <code>message type switch</code> " +
+                "placed after this node can route them separately from the incoming message.<br><br>" +
                 "Output connections: <code>Success</code>, <code>Failure</code>."
 )
 public class TbSplitToQueueNode implements TbNode {
@@ -132,7 +140,7 @@ public class TbSplitToQueueNode implements TbNode {
             toEnqueue[i] = out.transform().originator(originator).build();
         }
 
-        // Acknowledge the incoming message only once every produced message is enqueued; fail it on the first
+        // Forward the incoming message only once every produced message is enqueued; fail it on the first
         // enqueue error. `failed` makes the failure path fire at most once.
         AtomicInteger pending = new AtomicInteger(toEnqueue.length);
         AtomicBoolean failed = new AtomicBoolean();
@@ -140,7 +148,7 @@ public class TbSplitToQueueNode implements TbNode {
             ctx.enqueueForTellNext(out, targetQueue, TbNodeConnectionType.SUCCESS,
                     () -> {
                         if (pending.decrementAndGet() == 0 && !failed.get()) {
-                            ctx.ack(incoming);
+                            ctx.tellSuccess(incoming);
                         }
                     },
                     error -> {

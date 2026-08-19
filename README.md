@@ -31,8 +31,11 @@ partitioned by its own originator, and crosses a queue once instead of twice.
   of `originatorType` is looked up by the resulting name, and it becomes that message's originator.
 - Every produced message is enqueued onto the queue configured on the node itself (the node declares
   `hasQueueName`), not the queue the incoming message arrived on.
-- The incoming message is acknowledged **only after every produced message has been enqueued**, and
-  is routed to `Failure` if any one of them fails. A partial fan-out is never silently committed.
+- The incoming message is routed to `Success` **only after every produced message has been enqueued**,
+  and to `Failure` if any one of them fails. A partial fan-out is never silently committed.
+- Both the incoming message and the produced messages leave on `Success` — the incoming one directly, the
+  produced ones when they are later consumed from the target queue. They keep the message types the script
+  gave them, so a `message type switch` placed after this node can route each down its own branch.
 - All originators are resolved **before** anything is enqueued, so an unresolvable name fails the
   whole batch rather than leaving part of it on the queue.
 

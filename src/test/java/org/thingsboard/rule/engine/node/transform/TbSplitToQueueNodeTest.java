@@ -163,10 +163,10 @@ public class TbSplitToQueueNodeTest {
                 .doesNotContain((EntityId) incoming.getOriginator());
     }
 
-    // ---------- acknowledgement contract ----------
+    // ---------- forwarding contract ----------
 
     @Test
-    public void givenAllEnqueuesSucceed_whenOnMsg_thenIncomingIsAckedOnceAllAreDone() throws TbNodeException {
+    public void givenAllEnqueuesSucceed_whenOnMsg_thenIncomingGoesToSuccessOnceAllAreDone() throws TbNodeException {
         initWithDefaultConfig();
         var incoming = msgWithEntityName("ignored");
         given(scriptEngineMock.executeUpdateAsync(incoming)).willReturn(Futures.immediateFuture(
@@ -176,14 +176,14 @@ public class TbSplitToQueueNodeTest {
         node.onMsg(ctxMock, incoming);
 
         callbacks.onSuccess.get(0).run();
-        then(ctxMock).should(never()).ack(incoming);
+        then(ctxMock).should(never()).tellSuccess(incoming);
 
         callbacks.onSuccess.get(1).run();
-        then(ctxMock).should(times(1)).ack(incoming);
+        then(ctxMock).should(times(1)).tellSuccess(incoming);
     }
 
     @Test
-    public void givenOneEnqueueFails_whenOnMsg_thenIncomingIsFailedAndNeverAcked() throws TbNodeException {
+    public void givenOneEnqueueFails_whenOnMsg_thenIncomingIsFailedAndNeverForwarded() throws TbNodeException {
         initWithDefaultConfig();
         var incoming = msgWithEntityName("ignored");
         given(scriptEngineMock.executeUpdateAsync(incoming)).willReturn(Futures.immediateFuture(
@@ -196,7 +196,7 @@ public class TbSplitToQueueNodeTest {
         callbacks.onSuccess.get(1).run();
 
         then(ctxMock).should().tellFailure(incoming, error);
-        then(ctxMock).should(never()).ack(incoming);
+        then(ctxMock).should(never()).tellSuccess(incoming);
     }
 
     @Test
@@ -229,7 +229,7 @@ public class TbSplitToQueueNodeTest {
         // resolution happens for the whole batch before any enqueue, so a partial fan-out cannot be committed
         then(ctxMock).should(never()).enqueueForTellNext(any(TbMsg.class), anyString(), anyString(), any(), any());
         then(ctxMock).should().tellFailure(eq(incoming), any(Throwable.class));
-        then(ctxMock).should(never()).ack(incoming);
+        then(ctxMock).should(never()).tellSuccess(incoming);
     }
 
     @Test
@@ -293,7 +293,7 @@ public class TbSplitToQueueNodeTest {
                 .build();
     }
 
-    /** Captures the per-message enqueue callbacks so the acknowledgement contract can be driven explicitly. */
+    /** Captures the per-message enqueue callbacks so the forwarding contract can be driven explicitly. */
     private EnqueueCallbacks captureEnqueueCallbacks() {
         var captured = new EnqueueCallbacks();
         willAnswer(invocation -> {
