@@ -59,8 +59,83 @@ REST API.
 mvn clean install
 ```
 
-To build a ThingsBoard image with the node included:
+This produces `target/rule-engine-1.0.0-custom-nodes.jar`.
+
+## Adding the node to a ThingsBoard image
+
+The node has to be on the rule engine's classpath. The packaged `thingsboard.conf` already sets
+
+```sh
+export LOADER_PATH=/usr/share/thingsboard/conf,/usr/share/thingsboard/extensions
+```
+
+so dropping the jar into `/usr/share/thingsboard/extensions/` is all that is required — no configuration
+and no ThingsBoard code change.
+
+The commands below use two variables. **Export them first**, in every shell you run these commands in —
+the later steps reference them, and a plain assignment is lost when you open a new terminal:
 
 ```bash
-DOCKER_BUILDKIT=0 docker build . -t your_repo/tb-node:4.3.1.3-custom-1
+export REPO=your_docker_repo        # e.g. the Docker Hub namespace you push to
+export TAG=your_image_tag           # the tag of the ThingsBoard image you are extending
 ```
+
+Against a stock release, the bundled [`Dockerfile`](Dockerfile) does exactly that:
+
+```bash
+DOCKER_BUILDKIT=0 docker build . -t $REPO/tb-node:4.3.1.3-custom-1
+```
+
+### On top of an image you build yourself
+
+If you build ThingsBoard from source, the usual flow is:
+
+```bash
+cd <thingsboard-source>
+mvn license:format clean install -DskipTests
+docker buildx build -t $REPO/tb-node:$TAG \
+  --platform=linux/amd64,linux/arm64 -o type=registry msa/tb-node/target
+```
+
+**Copying the jar into `msa/tb-node/target/` does not work.** That directory is only the build context;
+the generated Dockerfile copies three named files (`logback.xml`, `start-tb-node.sh` and the `.deb`), so
+a jar it does not reference is ignored.
+
+Add a second, one-layer build on top of the image instead. ThingsBoard does not need rebuilding for
+this — the node is a separate jar:
+
+```bash
+cd <this-project>
+mvn clean install
+
+cat > Dockerfile.node <<EOF
+FROM $REPO/tb-node:$TAG
+COPY target/rule-engine-1.0.0-custom-nodes.jar /usr/share/thingsboard/extensions/
+EOF
+
+docker buildx build -f Dockerfile.node \
+  -t $REPO/tb-node:$TAG-split-to-queue \
+  --platform=linux/amd64,linux/arm64 -o type=registry .
+```
+
+The jar is architecture-independent, so both platforms come from the same base manifest and no second
+ThingsBoard build is needed.
+
+Alternatively, append the `COPY` to the *generated* Dockerfile after `mvn install` and before `buildx`,
+which keeps everything in one image and one build:
+
+```bash
+cp <this-project>/target/rule-engine-1.0.0-custom-nodes.jar msa/tb-node/target/
+echo 'COPY rule-engine-1.0.0-custom-nodes.jar /usr/share/thingsboard/extensions/' >> msa/tb-node/target/Dockerfile
+```
+
+`msa/tb-node/target/` is regenerated on every build, so this leaves the ThingsBoard tree unmodified —
+but it also has to be repeated on every rebuild, which is easy to forget.
+
+### Notes
+
+- Only the rule engine instantiates the node, but `tb-node` is the image that serves both core and rule
+  engine. That is harmless: core simply never uses it.
+- Keep `thingsboard.version` in [`pom.xml`](pom.xml) aligned with the image you are extending. The APIs
+  this node uses are stable across patch releases, but compiling against the exact runtime removes any
+  doubt.
